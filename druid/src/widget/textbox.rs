@@ -45,6 +45,12 @@ pub struct TextBox<T> {
     cursor_timer: TimerToken,
     cursor_on: bool,
     multiline: bool,
+    /// true if a click event caused us to gain focus.
+    ///
+    /// On macOS, if focus happens via click then we set the selection based
+    /// on the click position; if focus happens automatically (e.g. on tab)
+    /// then we select our entire contents.
+    was_focused_from_click: bool,
 }
 
 impl TextBox<()> {
@@ -67,6 +73,7 @@ impl<T> TextBox<T> {
             cursor_on: false,
             placeholder,
             multiline: false,
+            was_focused_from_click: false,
         }
     }
 
@@ -166,6 +173,17 @@ impl<T: TextStorage + EditableText> TextBox<T> {
         self.cursor_on = true;
         self.cursor_timer = token;
     }
+
+    // on macos we only draw the cursor if the selection is non-caret
+    #[cfg(target_os = "macos")]
+    fn should_draw_cursor(&self) -> bool {
+        self.cursor_on && self.editor.selection().is_caret()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn should_draw_cursor(&self) -> bool {
+        self.cursor_on
+    }
 }
 
 impl<T: TextStorage + EditableText> Widget<T> for TextBox<T> {
@@ -177,6 +195,7 @@ impl<T: TextStorage + EditableText> Widget<T> for TextBox<T> {
                 ctx.set_active(true);
 
                 if !mouse.focus {
+                    self.was_focused_from_click = true;
                     self.reset_cursor_blink(ctx.request_timer(CURSOR_BLINK_DURATION));
                     self.editor.click(mouse, data);
                 }
@@ -250,7 +269,12 @@ impl<T: TextStorage + EditableText> Widget<T> for TextBox<T> {
                 self.editor.set_text(data.to_owned());
                 self.editor.rebuild_if_needed(ctx.text(), env);
             }
-            LifeCycle::FocusChanged(_) => {
+            LifeCycle::FocusChanged(_is_focused) => {
+                #[cfg(target_os = "macos")]
+                if *_is_focused && !self.was_focused_from_click {
+                    self.editor.select_all(data);
+                }
+                self.was_focused_from_click = false;
                 self.reset_cursor_blink(ctx.request_timer(CURSOR_BLINK_DURATION));
                 ctx.request_paint();
             }
@@ -339,7 +363,7 @@ impl<T: TextStorage + EditableText> Widget<T> for TextBox<T> {
             }
 
             // Paint the cursor if focused and there's no selection
-            if is_focused && self.cursor_on {
+            if is_focused && self.should_draw_cursor() {
                 // the cursor position can extend past the edge of the layout
                 // (commonly when there is trailing whitespace) so we clamp it
                 // to the right edge.
